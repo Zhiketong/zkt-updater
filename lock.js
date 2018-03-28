@@ -1,12 +1,10 @@
 const debug = require('debug')('zktLock');
 const md5 = require('./md5');
 const pwait = require('pwait');
-const ZKTCache = require('./cache');
 
 class ZKTLock {
 
 	constructor(cacheInstance, options) {
-		if (!cacheInstance || !cacheInstance instanceof ZKTCache) throw new Error('ZKTLock need first parameter to be ZKTCache instance');
 
 		this.cache = cacheInstance;
 
@@ -76,6 +74,11 @@ class ZKTLock {
 		return { lockTimeoutValue, delayed, ignored };
 	}
 
+	async checkRaceLock(lockName) {
+		let key = this.getKey(lockName) + ':race';
+		return await this.cache.get(key) !== null;
+	}
+
 	async all(lockName, timeout, task) {
 		if (!lockName) throw new Error('need lockName');
 		if (!task && typeof timeout === 'function') {
@@ -130,7 +133,7 @@ class ZKTLock {
 			if (!_err || !_err.zkt_loader) console.error(`ZKTLock: task throws error for ${lockName}: `, _err);
 			err = _err;
 		}
-		debug(`task executed for ${lockName}`);
+		debug(`task executed for ${lockName}`, result);
 		if (lockTimeoutValue > Date.now()) {
 			debug(`unlocking ${lockName}`);
 			await this.cache.del(this.getKey(lockName) + ':race');

@@ -1,26 +1,25 @@
 const IORedis = require('ioredis');
-const NodeCache = require('node-cache');
-const ZKTCache = require('./cache');
 const ZKTLock = require('./lock');
 const debug = require('debug');
 const md5 = require('./md5');
+const wait = require('pwait');
 
 let redisInstances = {};
 
-class ZKTLoader {
+class ZKTUpdater {
 
-	constructor(name, loader, options) {
+	constructor(name, options) {
 
 		if (!name || !name.match(/^[a-z0-9\:\_\-\.]+$/i)) {
-			throw new Error('ZKTLoader need first argument to be a valid string');
+			throw new Error('ZKTUpdater need first argument to be a valid string');
 		}
 
 		this.name = name;
-		this.loader = loader;
-		this.options = Object.assign({
+		
+		if (!options.get || typeof options.get !== 'function') throw new Error('options should contain get function');
+		if (!options.change || typeof options.change !== 'function') throw new Error('options should contain change function');
 
-			//if use redis, if not, use in-memory cache provided by node-cache
-			useRedis: false, 
+		this.options = Object.assign({
 
 			//parameter passed to new IORedis()
 			redisOptions: process.env.REDIS_URL,
@@ -28,49 +27,84 @@ class ZKTLoader {
 			//use existing ioredis instance?
 			redisInstance: null,
 
-			//default expiration seconds
-			ttl: 30,
+			//write back delay seconds
+			changeDelay: 1,
 
 			//expiration seconds of loader call
 			loaderTimeout: 3,
 
 			//prefix for every key
-			keyPrefix: 'zktLoader'
+			keyPrefix: 'zktUpdater'
 
 		}, options);
 
 
 		//create cache instance
-		if (this.options.useRedis) {
-			let instance = null, optionsKey = JSON.stringify(this.options.redisOptions);
+		let instance = null, optionsKey = JSON.stringify(this.options.redisOptions);
 
-			//first, check redisInstance option
-			if (this.options.redisInstance) {
-				instance = this.options.redisInstance;
-			} else if ( this.options.redisOptions ) {
-				//check if there's already an existing redis instance created by 
-				//the same redisOptions. If not, create a new one
-				if (redisInstances[optionsKey]) {
-					instance = redisInstances[optionsKey];
-				} else {
-					redisInstances[optionsKey] = instance = new IORedis(this.options.redisOptions);
-				}
-			}
-
-			if (instance) {
-				this.cache = new ZKTCache(instance);
+		//first, check redisInstance option
+		if (this.options.redisInstance) {
+			instance = this.options.redisInstance;
+		} else if ( this.options.redisOptions ) {
+			//check if there's already an existing redis instance created by 
+			//the same redisOptions. If not, create a new one
+			if (redisInstances[optionsKey]) {
+				instance = redisInstances[optionsKey];
 			} else {
-				throw new Error('ZKTLoader should not initiated without redisOptions');
+				redisInstances[optionsKey] = instance = new IORedis(this.options.redisOptions);
 			}
-		} else {
-			this.cache = new ZKTCache(new NodeCache({
-				stdTTL: this.options.ttl * 2  //default ttl of node-cache
-			}));
 		}
 
-		this.debug = debug(`zktLoader:${this.name}`);
+		if (instance) {
+			this.cache = instance;
+		} else {
+			throw new Error('ZKTUpdater should not initiated without redisOptions');
+		}
+		
+		this.debug = debug(`zktUpdater:${this.name}`);
 		this.timeouts = {};
-		this.lock = new ZKTLock(this.cache);
+		this.lock = new ZKTLock(this.cache, {
+			defaultTimeout: this.options.loaderTimeout * 1000
+		});
+
+		this.cache.defineCommand('zktupdater_incrby', {
+			numberOfKeys: 1,
+			lua: `	if (redis.call('exists', KEYS[1]) == 1) then
+						local v = tonumber(redis.call('hget', KEYS[1], 'value'));
+						if (v + tonumber(ARGV[1]) >= 0) then
+							redis.call('hincrby', KEYS[1], 'diff', ARGV[1]);
+							return tonumber(redis.call('hincrby', KEYS[1], 'value', ARGV[1]));
+						end;
+						return -1;
+					end;
+					return -9999999;
+			`
+		});
+
+		this.cache.defineCommand('zktupdater_get_and_reset_diff', {
+			numberOfKeys: 2,
+			lua: `	redis.call('del', KEYS[2]);
+					if (redis.call('exists', KEYS[1]) == 1) then
+						local d = tonumber(redis.call('hget', KEYS[1], 'diff'));
+						redis.call('hset', KEYS[1], 'diff', 0);
+						return d;
+					end;
+					return 0;
+			`
+		});
+
+		this.cache.defineCommand('zktupdater_set_value_add_diff', {
+			numberOfKeys: 1,
+			lua: `	if (redis.call('exists', KEYS[1]) == 1) then
+						local d = tonumber(redis.call('hget', KEYS[1], 'diff'));
+						local v = tonumber(ARGV[1]) + d;
+						redis.call('hset', KEYS[1], 'value', v);
+						return v;
+					end;
+					redis.call('hset', KEYS[1], 'value', ARGV[1]);
+					return tonumber(ARGV[1]);
+			`
+		});
 	}
 
 	/**
@@ -85,76 +119,98 @@ class ZKTLoader {
 	}
 
 	/**
-	 * load data from cache or loader
+	 * get and initiate value
 	 */
-	async load(origKey, ...args) {
+	async get(origKey, ...args) {
 		let key = this.getKey(origKey);
+		let v = await this.cache.hgetall(key);
+		// this.debug(`get key ${key}`, v);
+		if (v && typeof v === 'object' && v.value) return v;
 
-		return new Promise(async (done, reject) => {
-			let did = false;
-			let v = null;
-			this.debug(`try to load ${key} from cache`);
-
+		let { executed, result } = await this.lock.race('get:' + key, async () => {
+			this.debug(`loading ${key} from get function`);
 			try {
-				v = await this.cache.get(key);
-				if (v && v.createTime) {
-					this.debug(`got ${key} from cache`);
-					done(v.value);
-					did = true;
-				} else {
-					this.debug(`${key} not found in cache`);
-				}
-
-				if (!v || (v && v.createTime && Date.now() - v.createTime > this.options.ttl * 1000)) {
-					let { executed } = await this.lock.race(origKey, async () => {
-						this.debug(`loading ${key} from loader`);
-						try {
-							let newData = await this.loader(origKey, ...args);
-							this.debug(`set ${key} to cache`);
-							await this.prime(origKey, newData);
-							if (!did) {
-								done(newData);
-								did = true;
-							}
-						} catch (err) {
-							if (typeof err === 'object') err.zkt_loader = 1;
-							if (err && err.code) throw err;
-							if (typeof err !== 'object') err = new Error(err);
-							err.message = `ZKT-Loader ${this.name}:${key} Error: ${err.message}`;
-							throw err;
-						}
-					}, did);
-
-					if (!executed && !did) {
-						this.load(origKey).then(done).catch(reject);
-					}
-				}
+				let newData = await this.options.get(origKey, ...args);
+				this.debug(`set ${key} to cache`);
+				await this.cache.hset(key, 'value', newData);
+				return newData;
 			} catch (err) {
-				if (!did) {
-					reject(err);
-				} else {
-					if (typeof err !== 'object') err = new Error(err);
-					err.message = `ZKT-Loader ${this.name}:${key} Error: ${err.message}`;
-					console.error(err);
-				}
+				if (typeof err === 'object') err.zkt_loader = 1;
+				if (err && err.code) throw err;
+				if (typeof err !== 'object') err = new Error(err);
+				err.message = `ZKT-Loader ${this.name}:${key} Error: ${err.message}`;
+				throw err;
 			}
 		});
+
+		if (executed && result !== null) return result;
+		return this.get(origKey, ...args);
 	}
 
-	//清除缓存
-	clear(key) {
-		return this.cache.del(this.getKey(key)).then(r => r * 1);
+
+
+	async incrby(origKey, incr, ...args) {
+		if (typeof incr !== 'number') throw new Error('datawriter.incryby only accepts numbers');
+		const key = this.getKey(origKey);
+		let r = await this.cache.zktupdater_incrby(key, incr);
+
+		//if not exists
+		if (r === -9999999) {
+			await this.get(origKey, ...args);
+			r = await this.cache.zktupdater_incrby(key, incr);
+		}
+
+		if (r <= 0) {
+			await wait(1000);
+			await this.cache.expire(key, 30);
+			return r;
+		}
+
+		this.write(origKey, ...args);	
+
+		return r;
 	}
 
-	//设置缓存
-	async prime(origKey, value) {
-		let key = this.getKey(origKey);
-		await this.cache.set(key, {
-			createTime: Date.now(),
-			value
-		}, 'EX', this.options.ttl * 2);
+	async write(origKey, ...args) {
+		try {
+			const key = this.getKey(origKey);
+			const lockKey = origKey + ':write:lock';
+			let notLocked = await this.cache.set(lockKey, '1', 'EX', this.options.changeDelay + 1, 'NX');
+
+			if (notLocked) {
+				setTimeout(async () => {
+					this.debug(`writing ${key} by change function`);
+					try {
+						let diff = await this.cache.zktupdater_get_and_reset_diff(key, lockKey);
+						this.debug('set value', diff);
+
+						if (Math.abs(diff) > 0) {
+							this.debug('save diff from last value to db');
+							//save diff from last value to db
+							await this.options.change(origKey, diff, ...args);
+						}
+
+						//get latest value from db again
+						let newData = await this.options.get(origKey, ...args);
+						this.debug('got new value', newData);
+
+						//prime lastest value to redis (add diff at the same time)
+						await this.cache.zktupdater_set_value_add_diff(key, newData);
+					} catch (err) {
+						console.error('zktUpdater got error when writing back', err);
+					}
+				}, this.options.changeDelay * 1000);
+			}
+		} catch (err) {
+			console.error('zktUpdater.write got error', err);
+		}
+	}
+
+	clear(origKey) {
+		this.debug('clearing', origKey);
+		return this.cache.del(this.getKey(origKey));
 	}
 }
 
 
-module.exports = ZKTLoader;
+module.exports = ZKTUpdater;

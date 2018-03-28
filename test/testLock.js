@@ -1,4 +1,3 @@
-const Cache = require('../cache');
 const Lock = require('../lock');
 const Redis = require('ioredis');
 // const NodeCache = require('node-cache');
