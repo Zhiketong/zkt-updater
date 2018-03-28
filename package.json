@@ -1,7 +1,7 @@
 {
-  "name": "zkt-loader",
-  "version": "1.0.5",
-  "description": "data cache with refresh lock",
+  "name": "zkt-updater",
+  "version": "1.0.0",
+  "description": "relyable inventory sync with redis",
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -14,7 +14,6 @@
   "dependencies": {
     "debug": "^3.1.0",
     "ioredis": "^3.2.1",
-    "node-cache": "^4.1.1",
     "pwait": "^1.0.1"
   },
   "directories": {
@@ -22,7 +21,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Zhiketong/zkt-loader.git"
+    "url": "git+https://github.com/Zhiketong/zkt-updater.git"
   },
   "keywords": [
     "redis",
@@ -30,11 +29,10 @@
     "dataloader",
     "redis",
     "lock",
-    "node-cache",
     "ioredis"
   ],
   "bugs": {
-    "url": "https://github.com/Zhiketong/zkt-loader/issues"
+    "url": "https://github.com/Zhiketong/zkt-updater/issues"
   },
-  "homepage": "https://github.com/Zhiketong/zkt-loader#readme"
+  "homepage": "https://github.com/Zhiketong/zkt-updater#readme"
 }
