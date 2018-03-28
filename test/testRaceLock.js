@@ -1,6 +1,5 @@
 const Lock = require('../lock');
 const Redis = require('ioredis');
-// const NodeCache = require('node-cache');
 const pwait = require('pwait');
 const waitRand = () => pwait(Math.ceil( Math.random() * 20 ));
 

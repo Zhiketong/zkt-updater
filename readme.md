@@ -1,6 +1,12 @@
 zkt-updater
 ==========
 
+fast and reliable inventory cache based on redis
+
+## Install ##
+
+`npm install zkt-updater`
+
 ## Usage ##
 
 ```javascript
@@ -21,7 +27,7 @@ router.post('/create_order', async ctx => {
 
 	let { ticket_product_id, tickets } = ctx.query;
 
-	let inventory = await updater.incrby(ticket_product_id, -tickets);
+	let inventory = await updater.incrby(ticket_product_id, -tickets, ctx);
 	if (inventory >= 0) {
 		await create_order(ctx);
 	}
@@ -30,3 +36,11 @@ router.post('/create_order', async ctx => {
 
 
 ```
+
+## Options ##
+
+`get(id, ...args)` get value function, returns Promise
+
+`change(id, diff, ...args)` update value function, returns Promise
+
+`changeDelay` (seconds),  when value changed in redis, wait some time before call the `change` function
