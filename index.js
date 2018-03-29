@@ -30,8 +30,11 @@ class ZKTUpdater {
 			//write back delay seconds
 			changeDelay: 1,
 
-			//expiration seconds of loader call
-			loaderTimeout: 3,
+			//max time of get value race lock (ms)
+			raceLockTimeout: 3000,
+
+			//value in redis will expire in this seconds if no query
+			redisKeyExpireSeconds: 30,
 
 			//prefix for every key
 			keyPrefix: 'zktUpdater'
@@ -64,7 +67,7 @@ class ZKTUpdater {
 		this.debug = debug(`zktUpdater:${this.name}`);
 		this.timeouts = {};
 		this.lock = new ZKTLock(this.cache, {
-			defaultTimeout: this.options.loaderTimeout * 1000
+			defaultTimeout: this.options.raceLockTimeout 
 		});
 
 		this.cache.defineCommand('zktupdater_incrby', {
@@ -73,6 +76,7 @@ class ZKTUpdater {
 						local v = tonumber(redis.call('hget', KEYS[1], 'value'));
 						if (v + tonumber(ARGV[1]) >= 0) then
 							redis.call('hincrby', KEYS[1], 'diff', ARGV[1]);
+							redis.call('expire', KEYS[1], ${this.options.redisKeyExpireSeconds});
 							return tonumber(redis.call('hincrby', KEYS[1], 'value', ARGV[1]));
 						end;
 						return -1;
@@ -160,13 +164,7 @@ class ZKTUpdater {
 			r = await this.cache.zktupdater_incrby(key, incr);
 		}
 
-		if (r <= 0) {
-			await wait(1000);
-			await this.cache.expire(key, 30);
-			return r;
-		}
-
-		this.write(origKey, ...args);	
+		this.write(origKey, ...args);
 
 		return r;
 	}
